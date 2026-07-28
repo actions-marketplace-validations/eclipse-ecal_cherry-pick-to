@@ -1,0 +1,84 @@
+name: Release
+
+# Keep the moving major-version tag (v1, v2, ...) pointing at the latest
+# release so consumers can pin to "@v1" and still get patch/minor updates.
+# Triggered whenever a release is published from a semver tag.
+on:
+  release:
+    types: [ published ]
+
+# Needs to write the vN tag back to the repository.
+permissions:
+  contents: write
+
+# Serialize releases so two publications cannot race while moving a major tag.
+concurrency:
+  group: release-major-tag
+
+jobs:
+
+  update-major-tag:
+    # The GitHub prerelease flag is authoritative even when the tag itself
+    # looks like a stable vMAJOR.MINOR.PATCH version.
+    if: github.event.release.prerelease == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          # The release tag is what we re-point the major tag at.
+          ref: ${{ github.event.release.tag_name }}
+          token: ${{ github.token }}
+
+      # The tag name is user-controllable, so it is passed as an environment
+      # variable and only ever used as a quoted shell variable — never inlined
+      # into the run script.
+      - name: Move the major-version tag
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$RELEASE_TAG" =~ ^v([0-9]+)\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::notice::Release tag '$RELEASE_TAG' is not a vMAJOR.MINOR.PATCH tag, not moving any major-version tag."
+            exit 0
+          fi
+
+          major="v${BASH_REMATCH[1]}"
+
+          # HEAD is the release tag's commit (checked out via ref above); use
+          # it directly instead of GITHUB_SHA, which for release events is not
+          # guaranteed to point at the tagged commit.
+          sha="$(git rev-parse HEAD)"
+
+          # Fetch the moving tag and all release tags before comparing. If the
+          # major tag already points at a newer stable release, leave it there.
+          git fetch --force --tags origin
+          if git rev-parse -q --verify "$major^{commit}" > /dev/null; then
+            current_sha="$(git rev-parse "$major^{commit}")"
+            current_tags="$(git tag --list "$major.*" --points-at "$current_sha")"
+            current_tag="$(printf '%s\n' "$current_tags" |
+              grep -E "^${major//./\\.}\.[0-9]+\.[0-9]+$" |
+              sort -V | tail -n 1 || true)"
+
+            if [ -z "$current_tag" ]; then
+              echo "::error::$major exists but does not point at a stable $major.MINOR.PATCH tag; refusing to overwrite it."
+              exit 1
+            fi
+
+            latest="$(printf '%s\n%s\n' "$current_tag" "$RELEASE_TAG" | sort -V | tail -n 1)"
+            if [ "$latest" != "$RELEASE_TAG" ] || [ "$current_tag" = "$RELEASE_TAG" ]; then
+              echo "Leaving $major at $current_tag; $RELEASE_TAG is not newer."
+              exit 0
+            fi
+          fi
+
+          echo "Pointing $major at $RELEASE_TAG ($sha)"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # -f because the major tag already exists from previous releases.
+          git tag -f -a "$major" -m "$major -> $RELEASE_TAG" "$sha"
+          git push -f origin "refs/tags/$major"
