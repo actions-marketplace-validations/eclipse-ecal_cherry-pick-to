@@ -1,8 +1,7 @@
 name: 'Cherry Pick To'
 description: >-
-  Cherry-pick the commits of a push onto every branch named by the merged
-  pull request's cherry-pick labels, and open one pull request per target
-  branch.
+  Cherry-pick a push onto every branch named by the merged PR's labels,
+  opening one pull request per target branch.
 
 branding:
   icon: git-branch
